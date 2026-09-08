@@ -1,11 +1,16 @@
 # BRAT はデフォルトブランチではなくリリースアセットからしか読まないため、
-# タグを push したらビルドしてリリースを作るところまで自動化する。
+# ビルドしてリリースを作るところまで自動化する。
+#
+# タグを push する経路と、手動実行（workflow_dispatch）の両方に対応する。
+# 手動実行のときはタグ名を manifest.json の version から決め、リリース作成時に
+# タグごと作る。タグを push できない環境からでもリリースを切れるようにするため。
 name: Release
 
 on:
   push:
     tags:
       - "*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -26,19 +31,31 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Check manifest version matches tag
+      - name: リリースするバージョンを決める
+        id: version
         run: |
           MANIFEST_VERSION=$(node -p "require('./manifest.json').version")
-          if [ "$MANIFEST_VERSION" != "$GITHUB_REF_NAME" ]; then
-            echo "manifest.json は $MANIFEST_VERSION、タグは $GITHUB_REF_NAME で食い違っています" >&2
-            exit 1
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            if [ "$MANIFEST_VERSION" != "$GITHUB_REF_NAME" ]; then
+              echo "manifest.json は $MANIFEST_VERSION、タグは $GITHUB_REF_NAME で食い違っています" >&2
+              exit 1
+            fi
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$MANIFEST_VERSION" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create release
+      - name: リリースを作る（既にあればアセットを差し替える）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            main.js manifest.json styles.css
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" main.js manifest.json styles.css --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --target "$GITHUB_SHA" \
+              --generate-notes \
+              main.js manifest.json styles.css
+          fi
