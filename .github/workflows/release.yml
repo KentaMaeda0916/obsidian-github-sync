@@ -1,0 +1,44 @@
+# BRAT はデフォルトブランチではなくリリースアセットからしか読まないため、
+# タグを push したらビルドしてリリースを作るところまで自動化する。
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Check manifest version matches tag
+        run: |
+          MANIFEST_VERSION=$(node -p "require('./manifest.json').version")
+          if [ "$MANIFEST_VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "manifest.json は $MANIFEST_VERSION、タグは $GITHUB_REF_NAME で食い違っています" >&2
+            exit 1
+          fi
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            main.js manifest.json styles.css

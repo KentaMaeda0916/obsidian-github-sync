@@ -1,0 +1,97 @@
+.github-sync-view { padding: 8px 12px; }
+
+.ghs-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ghs-branch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+}
+.ghs-branch span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ghs-status {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  padding: 4px 0 8px;
+}
+
+.ghs-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.ghs-empty { color: var(--text-muted); }
+
+.ghs-list {
+  max-height: 50vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ghs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* モバイルで指が届くようにタップ領域を確保する */
+  min-height: 40px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ghs-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-ui-small);
+}
+.ghs-kind {
+  width: 1.2em;
+  text-align: center;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+.ghs-kind-added { color: var(--color-green); }
+.ghs-kind-modified { color: var(--color-yellow); }
+.ghs-kind-deleted { color: var(--color-red); }
+
+.ghs-more {
+  background: transparent;
+  box-shadow: none;
+  padding: 4px;
+}
+
+.ghs-actions { margin-top: 12px; }
+.ghs-actions input[type="text"] { width: 100%; }
+.ghs-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ghs-buttons button { flex: 1; }
+
+.ghs-code {
+  font-family: var(--font-monospace);
+  font-size: 2em;
+  letter-spacing: 0.15em;
+  text-align: center;
+  padding: 12px;
+  margin: 8px 0;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  cursor: pointer;
+  user-select: all;
+}

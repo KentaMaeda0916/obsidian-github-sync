@@ -1,0 +1,20 @@
+{
+  "name": "obsidian-github-sync",
+  "version": "0.1.0",
+  "description": "A git client for Obsidian that stays stable on iOS by talking to the GitHub API instead of the git protocol.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit --skipLibCheck"
+  },
+  "keywords": ["obsidian", "git", "github", "sync", "ios"],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.24.2",
+    "obsidian": "^1.7.2",
+    "typescript": "^5.7.2"
+  }
+}
