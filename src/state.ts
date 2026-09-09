@@ -27,7 +27,11 @@ export interface SyncState {
 	headSha: string | null;
 	/** headSha 時点で GitHub が持っている path -> blobSHA。 */
 	baseline: TreeMap;
-	staged: string[];
+	/**
+	 * 明示的に「今回は含めない」と外されたパス。
+	 * 変更は既定で全部コミット対象にしたいので、選択ではなく除外を持つ。
+	 */
+	unstaged: string[];
 	queue: QueuedCommit[];
 	nextCommitId: number;
 	cache: Record<string, CacheEntry>;
@@ -38,7 +42,7 @@ export function emptyState(branch = "main"): SyncState {
 		branch,
 		headSha: null,
 		baseline: {},
-		staged: [],
+		unstaged: [],
 		queue: [],
 		nextCommitId: 1,
 		cache: {},

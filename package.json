@@ -1,6 +1,6 @@
 {
   "name": "obsidian-github-sync",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A git client for Obsidian that stays stable on iOS by talking to the GitHub API instead of the git protocol.",
   "main": "main.js",
   "scripts": {

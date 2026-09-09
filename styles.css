@@ -52,6 +52,8 @@
 }
 .ghs-path {
   flex: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: var(--background-modifier-hover);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -1,4 +1,4 @@
-import { ItemView, Menu, Notice, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Menu, Notice, TFile, WorkspaceLeaf, debounce, setIcon } from "obsidian";
 import type { Change } from "./diff";
 import { DirtyTreeError, NotClonedError, NotFastForwardError } from "./sync";
 import type GitHubSyncPlugin from "./main";
@@ -12,11 +12,20 @@ const KIND_LABEL: Record<Change["kind"], string> = {
 	deleted: "D",
 };
 
+const KIND_VERB: Record<Change["kind"], string> = {
+	added: "追加",
+	modified: "更新",
+	deleted: "削除",
+};
+
 export class SyncView extends ItemView {
 	private changes: Change[] = [];
-	private message = "";
+	/** ユーザーが自分で書いたメッセージ。空なら自動生成を使う。 */
+	private typedMessage = "";
 	private busy = false;
 	private status = "";
+	/** Vault のイベントで変更が知らされ、まだ取り込んでいないパス。 */
+	private readonly pending = new Set<string>();
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: GitHubSyncPlugin) {
 		super(leaf);
@@ -35,8 +44,43 @@ export class SyncView extends ItemView {
 	}
 
 	async onOpen(): Promise<void> {
+		// 編集を検知して変更リストを追従させる。取り込むのは変わったパスだけなので、
+		// 何度発火しても全走査にはならない。
+		const touch = (path: string) => {
+			this.pending.add(path);
+			this.absorbPending();
+		};
+		this.registerEvent(this.app.vault.on("create", (f) => touch(f.path)));
+		this.registerEvent(this.app.vault.on("modify", (f) => touch(f.path)));
+		this.registerEvent(this.app.vault.on("delete", (f) => touch(f.path)));
+		this.registerEvent(
+			this.app.vault.on("rename", (f, oldPath) => {
+				touch(oldPath);
+				touch(f.path);
+			}),
+		);
+		// 他のペインから戻ってきたときにも最新にする（差分を取り直すだけなので軽い）
+		this.registerEvent(this.app.workspace.on("active-leaf-change", () => void this.refresh()));
+
 		await this.refresh();
 	}
+
+	/** 溜まったパスをまとめて取り込む。連続入力で毎回走らせないよう間引く。 */
+	private readonly absorbPending = debounce(
+		() => {
+			void (async () => {
+				const engine = this.plugin.engine;
+				if (!engine || this.busy || this.pending.size === 0) return;
+
+				const paths = [...this.pending];
+				this.pending.clear();
+				for (const path of paths) await engine.notePathChanged(path);
+				await this.refresh();
+			})();
+		},
+		700,
+		true,
+	);
 
 	/** 変更リストを取り直して描画する。 */
 	async refresh(): Promise<void> {
@@ -62,13 +106,12 @@ export class SyncView extends ItemView {
 			const result = await fn();
 			this.status = "";
 			if (result) new Notice(result);
-			await this.refresh();
 		} catch (e) {
 			this.status = "";
 			new Notice(describe(e), 8000);
-			this.render();
 		} finally {
 			this.busy = false;
+			await this.refresh();
 		}
 	}
 
@@ -77,8 +120,7 @@ export class SyncView extends ItemView {
 		root.empty();
 		root.addClass("github-sync-view");
 
-		const engine = this.plugin.engine;
-		if (!engine) {
+		if (!this.plugin.engine) {
 			root.createEl("p", { text: "設定で GitHub と接続してください。" });
 			return;
 		}
@@ -111,21 +153,18 @@ export class SyncView extends ItemView {
 
 	private renderChanges(root: HTMLElement): void {
 		const engine = this.plugin.engine!;
-		const staged = new Set(engine.state.staged);
+		const selected = engine.selected(this.changes);
 
 		const head = root.createDiv({ cls: "ghs-list-head" });
-		head.createSpan({ text: `変更 ${this.changes.length}件` });
+		head.createSpan({ text: `変更 ${this.changes.length}件（${selected.length}件を選択中）` });
 
 		if (this.changes.length > 0) {
-			const all = head.createEl("button", {
-				text: staged.size === this.changes.length ? "全解除" : "全選択",
-			});
-			all.onclick = () =>
-				this.run("", async () => {
-					await engine.setStaged(
-						staged.size === this.changes.length ? [] : this.changes.map((c) => c.path),
-					);
-				});
+			const allOn = selected.length === this.changes.length;
+			const toggleAll = head.createEl("button", { text: allOn ? "全解除" : "全選択" });
+			toggleAll.onclick = () =>
+				this.run("", () =>
+					engine.setUnstaged(allOn ? this.changes.map((c) => c.path) : []),
+				);
 		}
 
 		if (this.changes.length === 0) {
@@ -138,11 +177,18 @@ export class SyncView extends ItemView {
 			const row = list.createDiv({ cls: "ghs-row" });
 
 			const check = row.createEl("input", { type: "checkbox" });
-			check.checked = staged.has(change.path);
-			check.onclick = () => this.run("", () => engine.toggleStaged(change.path));
+			check.checked = engine.isSelected(change.path);
+			check.onclick = () => this.run("", () => engine.toggle(change.path));
 
-			row.createSpan({ cls: `ghs-kind ghs-kind-${change.kind}`, text: KIND_LABEL[change.kind] });
-			row.createSpan({ cls: "ghs-path", text: shorten(change.path) }).title = change.path;
+			row.createSpan({
+				cls: `ghs-kind ghs-kind-${change.kind}`,
+				text: KIND_LABEL[change.kind],
+			});
+
+			// パスをタップしたらそのファイルを開く
+			const path = row.createSpan({ cls: "ghs-path", text: shorten(change.path) });
+			path.title = change.path;
+			path.onclick = () => void this.openFile(change);
 
 			const more = row.createEl("button", { cls: "ghs-more" });
 			setIcon(more, "more-horizontal");
@@ -152,45 +198,74 @@ export class SyncView extends ItemView {
 
 	private renderActions(root: HTMLElement): void {
 		const engine = this.plugin.engine!;
+		const selected = engine.selected(this.changes);
+		const queued = engine.state.queue.length;
 		const box = root.createDiv({ cls: "ghs-actions" });
 
-		const input = box.createEl("input", {
-			type: "text",
-			placeholder: "コミットメッセージ",
-		});
-		input.value = this.message;
+		// 空のままなら自動生成したメッセージを使う。中身は見えるので直せる。
+		const input = box.createEl("input", { type: "text", placeholder: "コミットメッセージ" });
+		input.value = this.typedMessage || generateMessage(selected);
 		input.oninput = () => {
-			this.message = input.value;
+			this.typedMessage = input.value;
 		};
 
 		const buttons = box.createDiv({ cls: "ghs-buttons" });
 
 		const commit = buttons.createEl("button", { text: "コミット" });
-		commit.disabled = this.busy || engine.state.staged.length === 0;
+		commit.disabled = this.busy || selected.length === 0;
 		commit.onclick = () =>
 			this.run("コミット中…", async () => {
-				const count = engine.state.staged.length;
-				await engine.commit(this.message.trim() || defaultMessage(count));
-				this.message = "";
+				const count = selected.length;
+				await engine.commit(this.commitMessage(selected));
+				this.typedMessage = "";
 				return `${count} 件をコミットしました`;
 			});
 
-		const queued = engine.state.queue.length;
 		const push = buttons.createEl("button", {
 			cls: "mod-cta",
 			text: queued > 0 ? `Push (${queued})` : "Push",
 		});
-		push.disabled = this.busy || queued === 0;
+		push.disabled = this.busy || (queued === 0 && selected.length === 0);
 		push.onclick = () =>
 			this.run("送信中…", async () => {
+				// 未コミットの選択が残っているなら、まとめてコミットしてから送る
+				if (engine.state.queue.length === 0) {
+					await engine.commit(this.commitMessage(selected));
+					this.typedMessage = "";
+				}
 				const n = await engine.push((m) => this.setStatus(m));
 				return `${n} コミットを push しました`;
 			});
 	}
 
+	private commitMessage(selected: Change[]): string {
+		return this.typedMessage.trim() || generateMessage(selected);
+	}
+
+	private async openFile(change: Change): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(change.path);
+		if (file instanceof TFile) {
+			await this.app.workspace.getLeaf(false).openFile(file);
+			return;
+		}
+		new Notice(
+			change.kind === "deleted"
+				? "削除済みのファイルです"
+				: `開けませんでした: ${change.path}`,
+		);
+	}
+
 	private openRowMenu(evt: MouseEvent, change: Change): void {
 		const engine = this.plugin.engine!;
 		const menu = new Menu();
+
+		menu.addItem((item) =>
+			item
+				.setTitle("開く")
+				.setIcon("file-text")
+				.onClick(() => void this.openFile(change)),
+		);
+
 		menu.addItem((item) =>
 			item
 				.setTitle("元に戻す")
@@ -208,6 +283,7 @@ export class SyncView extends ItemView {
 					});
 				}),
 		);
+
 		menu.showAtMouseEvent(evt);
 	}
 
@@ -277,16 +353,30 @@ export class SyncView extends ItemView {
 	}
 }
 
-function defaultMessage(count: number): string {
-	const today = new Date().toISOString().slice(0, 10);
-	return `vault: update ${count} files (${today})`;
+/**
+ * コミットメッセージを変更内容から組み立てる。
+ * 手で書かなくても git log が読めるものになることを狙う。
+ */
+export function generateMessage(changes: Change[]): string {
+	if (changes.length === 0) return "vault: 変更なし";
+
+	const kinds = new Set(changes.map((c) => c.kind));
+	const verb = kinds.size === 1 ? KIND_VERB[changes[0].kind] : "更新";
+	const name = basename(changes[0].path);
+
+	return changes.length === 1
+		? `${verb}: ${name}`
+		: `${verb}: ${name} ほか${changes.length - 1}件`;
+}
+
+function basename(path: string): string {
+	return path.slice(path.lastIndexOf("/") + 1);
 }
 
 /** モバイルの幅に収まるよう、長いパスは中央を省く。 */
 function shorten(path: string): string {
 	if (path.length <= 44) return path;
-	const name = path.slice(path.lastIndexOf("/") + 1);
-	return `…/${name}`;
+	return `…/${basename(path)}`;
 }
 
 function describe(e: unknown): string {

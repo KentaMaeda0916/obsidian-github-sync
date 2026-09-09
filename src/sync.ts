@@ -5,6 +5,7 @@ import type { CacheEntry, CommitSnapshot, Store, SyncState } from "./state";
 import type { Settings } from "./settings";
 import { gitBlobSha } from "./hash";
 import * as vfs from "./vaultfs";
+import { isIgnored as isIgnoredPath } from "./vaultfs";
 
 export type Progress = (message: string, done?: number, total?: number) => void;
 
@@ -21,6 +22,14 @@ const noop: Progress = () => undefined;
 const FETCH_CONCURRENCY = 6;
 
 export class SyncEngine {
+	/**
+	 * vault の現状（path -> blobSHA）。
+	 *
+	 * 一度作ったらメモリに保持し、以降は Vault のイベントで変わったパスだけ
+	 * 差し替える。毎回 1,800 件を走査し直すと iOS では体感で止まるため。
+	 */
+	private localTree: TreeMap | null = null;
+
 	constructor(
 		private readonly adapter: DataAdapter,
 		private readonly client: GitHubClient,
@@ -41,7 +50,7 @@ export class SyncEngine {
 	 * mtime と size が前回と同じファイルはキャッシュ済みのハッシュを使い回すので、
 	 * 実際に読むのは変更されたファイルだけになる。全件ハッシュを避けるのが要点。
 	 */
-	async localTree(progress: Progress = noop): Promise<TreeMap> {
+	private async scanAll(progress: Progress = noop): Promise<TreeMap> {
 		const paths = await vfs.listVaultFiles(this.adapter, this.settings.ignore);
 		const tree: TreeMap = {};
 		const nextCache: Record<string, CacheEntry> = {};
@@ -70,30 +79,68 @@ export class SyncEngine {
 		return tree;
 	}
 
+	/** 走査済みのツリーを返す。まだ無ければ1回だけ全走査する。 */
+	private async ensureLocalTree(progress: Progress = noop): Promise<TreeMap> {
+		if (!this.localTree) this.localTree = await this.scanAll(progress);
+		return this.localTree;
+	}
+
 	async localChanges(progress: Progress = noop): Promise<Change[]> {
-		return diffTrees(this.state.baseline, await this.localTree(progress));
+		return diffTrees(this.state.baseline, await this.ensureLocalTree(progress));
+	}
+
+	/**
+	 * 1ファイルの変更を取り込む。Vault のイベントから呼ぶ。
+	 * 走査はせず、そのパスだけ読み直すので何度呼んでも軽い。
+	 */
+	async notePathChanged(path: string): Promise<void> {
+		if (!this.localTree) return; // まだ走査していないなら次の全走査で拾われる
+		if (isIgnoredPath(path, this.settings.ignore)) return;
+
+		const stat = await this.adapter.stat(path).catch(() => null);
+		if (!stat || stat.type !== "file") {
+			delete this.localTree[path];
+			delete this.state.cache[path];
+			return;
+		}
+
+		const sha = await gitBlobSha(await this.adapter.readBinary(path));
+		this.localTree[path] = sha;
+		this.state.cache[path] = { m: stat.mtime, s: stat.size, h: sha };
 	}
 
 	/** キャッシュを捨てて全ファイルを読み直す。ズレを疑ったときの手動操作。 */
 	async rescan(progress: Progress = noop): Promise<Change[]> {
 		this.state.cache = {};
+		this.localTree = null;
 		const changes = await this.localChanges(progress);
 		await this.save();
 		return changes;
 	}
 
+	/** 変更のうち、実際にコミット対象になるもの（除外されていないもの）。 */
+	selected(changes: Change[]): Change[] {
+		const excluded = new Set(this.state.unstaged);
+		return changes.filter((c) => !excluded.has(c.path));
+	}
+
 	// ---- ステージ ----------------------------------------------------------
 
-	async setStaged(paths: string[]): Promise<void> {
-		this.state.staged = [...new Set(paths)].sort();
+	/** 除外リストを丸ごと差し替える（全選択・全解除用）。 */
+	async setUnstaged(paths: string[]): Promise<void> {
+		this.state.unstaged = [...new Set(paths)].sort();
 		await this.save();
 	}
 
-	async toggleStaged(path: string): Promise<void> {
-		const staged = new Set(this.state.staged);
-		if (staged.has(path)) staged.delete(path);
-		else staged.add(path);
-		await this.setStaged([...staged]);
+	async toggle(path: string): Promise<void> {
+		const excluded = new Set(this.state.unstaged);
+		if (excluded.has(path)) excluded.delete(path);
+		else excluded.add(path);
+		await this.setUnstaged([...excluded]);
+	}
+
+	isSelected(path: string): boolean {
+		return !this.state.unstaged.includes(path);
 	}
 
 	// ---- コミット（ローカル・ネットワーク不要） -----------------------------
@@ -105,9 +152,8 @@ export class SyncEngine {
 	 * push までの間に加えた編集が、過去のコミットの中身として送られてしまう。
 	 */
 	async commit(message: string, progress: Progress = noop): Promise<void> {
-		const staged = new Set(this.state.staged);
-		const changes = (await this.localChanges(progress)).filter((c) => staged.has(c.path));
-		if (changes.length === 0) throw new Error("ステージされた変更がありません");
+		const changes = this.selected(await this.localChanges(progress));
+		if (changes.length === 0) throw new Error("コミットするファイルが選ばれていません");
 
 		const snapshot: CommitSnapshot = {};
 		const paths: string[] = [];
@@ -125,7 +171,9 @@ export class SyncEngine {
 		const id = this.state.nextCommitId++;
 		await this.store.saveSnapshot(id, snapshot);
 		this.state.queue.push({ id, message, ts: Date.now(), paths, deleted });
-		this.state.staged = [];
+		// コミットした分の除外指定はもう意味を持たない
+		const committed = new Set(changes.map((c) => c.path));
+		this.state.unstaged = this.state.unstaged.filter((p) => !committed.has(p));
 		await this.save();
 	}
 
@@ -254,7 +302,7 @@ export class SyncEngine {
 
 		this.state.branch = branch;
 		this.state.headSha = head;
-		this.state.staged = [];
+		this.state.unstaged = [];
 		this.state.queue = [];
 		await this.save();
 		return incoming.length;
@@ -275,8 +323,12 @@ export class SyncEngine {
 				await vfs.writeBase64(this.adapter, path, await this.client.getBlobBase64(sha));
 			}
 			delete this.state.cache[path];
+			if (this.localTree) {
+				if (sha === undefined) delete this.localTree[path];
+				else this.localTree[path] = sha;
+			}
 		}
-		this.state.staged = this.state.staged.filter((p) => !paths.includes(p));
+		this.state.unstaged = this.state.unstaged.filter((p) => !paths.includes(p));
 		await this.save();
 	}
 
@@ -345,6 +397,7 @@ export class SyncEngine {
 			const base64 = await this.client.getBlobBase64(change.sha as string);
 			await vfs.writeBase64(this.adapter, change.path, base64);
 			delete this.state.cache[change.path];
+			if (this.localTree) this.localTree[change.path] = change.sha as string;
 			done++;
 			if (done % 20 === 0 || done === writes.length) {
 				progress("ファイルを取得中", done, writes.length);
@@ -354,6 +407,7 @@ export class SyncEngine {
 		for (const change of deletes) {
 			await vfs.removeIfExists(this.adapter, change.path);
 			delete this.state.cache[change.path];
+			if (this.localTree) delete this.localTree[change.path];
 		}
 
 		this.state.baseline = { ...resultTree };
