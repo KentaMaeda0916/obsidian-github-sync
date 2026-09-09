@@ -16,8 +16,16 @@ export interface PluginData {
 	auth: StoredAuth | null;
 }
 
+/**
+ * この vault 用に作った GitHub App の Client ID。
+ * device flow は client secret を使わないため、これは公開情報であり秘密ではない
+ * （CLI ツールが client_id をソースに埋め込んでいるのと同じ）。
+ * 別の App を使いたい場合は設定画面から上書きできる。
+ */
+const DEFAULT_CLIENT_ID = "Iv23lizZeip3nAY9Wk88";
+
 export const DEFAULT_SETTINGS: Settings = {
-	clientId: "",
+	clientId: DEFAULT_CLIENT_ID,
 	owner: "KentaMaeda0916",
 	repo: "ObsidianVault",
 	ignore: [".obsidian", ".git", ".trash", ".DS_Store", ".worktrees"],
