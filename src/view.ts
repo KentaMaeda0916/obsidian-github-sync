@@ -13,9 +13,9 @@ const KIND_LABEL: Record<Change["kind"], string> = {
 };
 
 const KIND_VERB: Record<Change["kind"], string> = {
-	added: "追加",
-	modified: "更新",
-	deleted: "削除",
+	added: "Add",
+	modified: "Update",
+	deleted: "Delete",
 };
 
 export class SyncView extends ItemView {
@@ -26,6 +26,8 @@ export class SyncView extends ItemView {
 	private status = "";
 	/** Vault のイベントで変更が知らされ、まだ取り込んでいないパス。 */
 	private readonly pending = new Set<string>();
+	/** 中身を開いている未 push コミットの id。 */
+	private readonly expanded = new Set<number>();
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: GitHubSyncPlugin) {
 		super(leaf);
@@ -128,6 +130,7 @@ export class SyncView extends ItemView {
 		this.renderHeader(root);
 		if (this.status) root.createEl("div", { cls: "ghs-status", text: this.status });
 		this.renderChanges(root);
+		this.renderQueue(root);
 		this.renderActions(root);
 	}
 
@@ -149,6 +152,122 @@ export class SyncView extends ItemView {
 					? "最新です"
 					: `${applied.length} 件のファイルを更新しました`;
 			});
+
+		const more = header.createEl("button", { cls: "ghs-more" });
+		setIcon(more, "more-vertical");
+		more.onclick = (evt) => this.openOverflowMenu(evt);
+	}
+
+	private openOverflowMenu(evt: MouseEvent): void {
+		const engine = this.plugin.engine!;
+		const menu = new Menu();
+
+		menu.addItem((item) =>
+			item
+				.setTitle("未コミットの変更を全部取り消す")
+				.setIcon("undo")
+				.setDisabled(this.changes.length === 0)
+				.onClick(async () => {
+					const paths = this.changes.map((c) => c.path);
+					const ok = await confirmModal(
+						this.app,
+						"変更を全部取り消す",
+						`${paths.length} 件の未コミットの変更を破棄します。取り消せません。\n` +
+							"コミット済み・未 push の内容はそのまま残ります。",
+					);
+					if (!ok) return;
+					await this.run("元に戻しています…", async () => {
+						await engine.discard(paths, (m) => this.setStatus(m));
+						return `${paths.length} 件を元に戻しました`;
+					});
+				}),
+		);
+
+		menu.addItem((item) =>
+			item
+				.setTitle("再スキャン")
+				.setIcon("refresh-cw")
+				.onClick(() =>
+					this.run("再スキャン中…", async () => {
+						const changes = await engine.rescan((m) => this.setStatus(m));
+						return `変更 ${changes.length} 件`;
+					}),
+				),
+		);
+
+		menu.showAtMouseEvent(evt);
+	}
+
+	/** コミット済み・未 push のコミット一覧。ここに出ている分は変更リストから消える。 */
+	private renderQueue(root: HTMLElement): void {
+		const engine = this.plugin.engine!;
+		const queue = engine.state.queue;
+		if (queue.length === 0) return;
+
+		root.createDiv({
+			cls: "ghs-list-head",
+			text: `コミット済み・未 push ${queue.length}件`,
+		});
+
+		const list = root.createDiv({ cls: "ghs-list" });
+		for (const commit of queue) {
+			const files = [...commit.paths, ...commit.deleted];
+			const row = list.createDiv({ cls: "ghs-row ghs-commit" });
+
+			const caret = row.createSpan({ cls: "ghs-caret" });
+			setIcon(caret, this.expanded.has(commit.id) ? "chevron-down" : "chevron-right");
+
+			const label = row.createSpan({ cls: "ghs-path", text: commit.message });
+			label.title = commit.message;
+			row.createSpan({ cls: "ghs-count", text: `${files.length}` });
+
+			const toggle = () => {
+				if (this.expanded.has(commit.id)) this.expanded.delete(commit.id);
+				else this.expanded.add(commit.id);
+				this.render();
+			};
+			caret.onclick = toggle;
+			label.onclick = toggle;
+
+			const more = row.createEl("button", { cls: "ghs-more" });
+			setIcon(more, "more-horizontal");
+			more.onclick = (evt) => {
+				const menu = new Menu();
+				menu.addItem((item) =>
+					item
+						.setTitle("このコミットを取り消す")
+						.setIcon("undo")
+						.onClick(() =>
+							this.run("取り消しています…", async () => {
+								await engine.uncommit(commit.id);
+								return "コミットを取り消しました";
+							}),
+						),
+				);
+				menu.showAtMouseEvent(evt);
+			};
+
+			if (!this.expanded.has(commit.id)) continue;
+
+			for (const path of files) {
+				const child = list.createDiv({ cls: "ghs-row ghs-child" });
+				const name = child.createSpan({ cls: "ghs-path", text: shorten(path) });
+				name.title = path;
+				name.onclick = () =>
+					void this.openFile({
+						path,
+						kind: commit.deleted.includes(path) ? "deleted" : "modified",
+						sha: null,
+					});
+
+				const undo = child.createEl("button", { text: "戻す" });
+				undo.onclick = () =>
+					this.run("戻しています…", async () => {
+						await engine.uncommit(commit.id, [path]);
+						return `${basename(path)} を未コミットに戻しました`;
+					});
+			}
+		}
 	}
 
 	private renderChanges(root: HTMLElement): void {
@@ -156,7 +275,7 @@ export class SyncView extends ItemView {
 		const selected = engine.selected(this.changes);
 
 		const head = root.createDiv({ cls: "ghs-list-head" });
-		head.createSpan({ text: `変更 ${this.changes.length}件（${selected.length}件を選択中）` });
+		head.createSpan({ text: `未コミット ${this.changes.length}件（${selected.length}件を選択中）` });
 
 		if (this.changes.length > 0) {
 			const allOn = selected.length === this.changes.length;
@@ -168,7 +287,7 @@ export class SyncView extends ItemView {
 		}
 
 		if (this.changes.length === 0) {
-			root.createEl("p", { cls: "ghs-empty", text: "変更はありません" });
+			root.createEl("p", { cls: "ghs-empty", text: "未コミットの変更はありません" });
 			return;
 		}
 
@@ -355,18 +474,18 @@ export class SyncView extends ItemView {
 
 /**
  * コミットメッセージを変更内容から組み立てる。
- * 手で書かなくても git log が読めるものになることを狙う。
+ * リポジトリの履歴に残るものなので英語に統一する（ファイル名はそのまま）。
  */
 export function generateMessage(changes: Change[]): string {
-	if (changes.length === 0) return "vault: 変更なし";
+	if (changes.length === 0) return "Sync vault";
 
 	const kinds = new Set(changes.map((c) => c.kind));
-	const verb = kinds.size === 1 ? KIND_VERB[changes[0].kind] : "更新";
+	const verb = kinds.size === 1 ? KIND_VERB[changes[0].kind] : "Update";
 	const name = basename(changes[0].path);
+	const rest = changes.length - 1;
 
-	return changes.length === 1
-		? `${verb}: ${name}`
-		: `${verb}: ${name} ほか${changes.length - 1}件`;
+	if (rest === 0) return `${verb} ${name}`;
+	return `${verb} ${name} and ${rest} more ${rest === 1 ? "file" : "files"}`;
 }
 
 function basename(path: string): string {

@@ -9,6 +9,11 @@ export interface QueuedCommit {
 	/** 追加・変更されたパス。 */
 	paths: string[];
 	deleted: string[];
+	/**
+	 * paths の blob SHA。baseline にこれを重ねると「コミット済みの状態」になる。
+	 * 0.2.0 以前のキューには無いのでスナップショットから補う。
+	 */
+	shas?: Record<string, string>;
 }
 
 /** コミット時点のファイル内容のスナップショット（path -> base64）。 */

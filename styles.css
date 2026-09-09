@@ -97,3 +97,30 @@
   cursor: pointer;
   user-select: all;
 }
+
+/* コミット済み・未 push のコミット行 */
+.ghs-commit .ghs-path { font-weight: 500; }
+.ghs-caret {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 2px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ghs-count {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  padding: 0 4px;
+}
+.ghs-child {
+  padding-left: 22px;
+  min-height: 34px;
+}
+.ghs-child .ghs-path {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+.ghs-child button {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 8px;
+}

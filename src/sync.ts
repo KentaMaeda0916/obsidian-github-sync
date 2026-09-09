@@ -1,7 +1,8 @@
 import type { DataAdapter } from "obsidian";
+import { base64ToArrayBuffer } from "obsidian";
 import type { BranchInfo, GitHubClient, TreeMap } from "./github";
 import { type Change, diffTrees } from "./diff";
-import type { CacheEntry, CommitSnapshot, Store, SyncState } from "./state";
+import type { CacheEntry, CommitSnapshot, QueuedCommit, Store, SyncState } from "./state";
 import type { Settings } from "./settings";
 import { gitBlobSha } from "./hash";
 import * as vfs from "./vaultfs";
@@ -79,14 +80,50 @@ export class SyncEngine {
 		return tree;
 	}
 
+	/**
+	 * baseline に未 push のコミットを重ねたもの。
+	 *
+	 * 「GitHub にあるか、こちらでコミット済みか」の状態を表す。変更リストは
+	 * これとの差分を取るので、コミットした分はリストから消える（＝コミット前後が
+	 * 見た目で区別できる）。
+	 */
+	async effectiveTree(): Promise<TreeMap> {
+		const tree: TreeMap = { ...this.state.baseline };
+		for (const commit of this.state.queue) {
+			for (const [path, sha] of Object.entries(await this.commitShas(commit))) {
+				tree[path] = sha;
+			}
+			for (const path of commit.deleted) delete tree[path];
+		}
+		return tree;
+	}
+
+	/** キューが SHA を持っていなければスナップショットから補って保存する。 */
+	private async commitShas(commit: QueuedCommit): Promise<Record<string, string>> {
+		if (commit.shas) return commit.shas;
+
+		const snapshot = await this.store.loadSnapshot(commit.id);
+		const shas: Record<string, string> = {};
+		for (const path of commit.paths) {
+			const base64 = snapshot[path];
+			if (base64 !== undefined) {
+				shas[path] = await gitBlobSha(new Uint8Array(base64ToArrayBuffer(base64)));
+			}
+		}
+		commit.shas = shas;
+		await this.save();
+		return shas;
+	}
+
 	/** 走査済みのツリーを返す。まだ無ければ1回だけ全走査する。 */
 	private async ensureLocalTree(progress: Progress = noop): Promise<TreeMap> {
 		if (!this.localTree) this.localTree = await this.scanAll(progress);
 		return this.localTree;
 	}
 
+	/** まだコミットしていない変更。コミット済みの分はここに出ない。 */
 	async localChanges(progress: Progress = noop): Promise<Change[]> {
-		return diffTrees(this.state.baseline, await this.ensureLocalTree(progress));
+		return diffTrees(await this.effectiveTree(), await this.ensureLocalTree(progress));
 	}
 
 	/**
@@ -156,6 +193,7 @@ export class SyncEngine {
 		if (changes.length === 0) throw new Error("コミットするファイルが選ばれていません");
 
 		const snapshot: CommitSnapshot = {};
+		const shas: Record<string, string> = {};
 		const paths: string[] = [];
 		const deleted: string[] = [];
 
@@ -164,16 +202,45 @@ export class SyncEngine {
 				deleted.push(change.path);
 			} else {
 				snapshot[change.path] = await vfs.readBase64(this.adapter, change.path);
+				shas[change.path] = change.sha as string;
 				paths.push(change.path);
 			}
 		}
 
 		const id = this.state.nextCommitId++;
 		await this.store.saveSnapshot(id, snapshot);
-		this.state.queue.push({ id, message, ts: Date.now(), paths, deleted });
+		this.state.queue.push({ id, message, ts: Date.now(), paths, deleted, shas });
 		// コミットした分の除外指定はもう意味を持たない
 		const committed = new Set(changes.map((c) => c.path));
 		this.state.unstaged = this.state.unstaged.filter((p) => !committed.has(p));
+		await this.save();
+	}
+
+	/**
+	 * 未 push のコミットから指定パスを外す。paths 省略でコミットごと取り消す。
+	 *
+	 * 作業ツリーのファイルには触らない。実効ツリーから外れる結果、その分が
+	 * 「未コミットの変更」として戻ってくる。
+	 */
+	async uncommit(id: number, paths?: string[]): Promise<void> {
+		const index = this.state.queue.findIndex((c) => c.id === id);
+		if (index < 0) return;
+
+		const commit = this.state.queue[index];
+		const target = new Set(paths ?? [...commit.paths, ...commit.deleted]);
+
+		commit.paths = commit.paths.filter((p) => !target.has(p));
+		commit.deleted = commit.deleted.filter((p) => !target.has(p));
+		if (commit.shas) for (const path of target) delete commit.shas[path];
+
+		if (commit.paths.length === 0 && commit.deleted.length === 0) {
+			this.state.queue.splice(index, 1);
+			await this.store.deleteSnapshot(commit.id);
+		} else {
+			const snapshot = await this.store.loadSnapshot(commit.id);
+			for (const path of target) delete snapshot[path];
+			await this.store.saveSnapshot(commit.id, snapshot);
+		}
 		await this.save();
 	}
 
@@ -310,17 +377,25 @@ export class SyncEngine {
 
 	// ---- discard -----------------------------------------------------------
 
-	/** 指定パスを baseline の内容に戻す。baseline に無いもの（新規追加）は削除する。 */
+	/**
+	 * 指定パスを実効ツリー（GitHub の内容 + コミット済みの内容）に戻す。
+	 * どちらにも無いもの（新規追加）は削除する。
+	 */
 	async discard(paths: string[], progress: Progress = noop): Promise<void> {
+		const target = await this.effectiveTree();
+
 		for (let i = 0; i < paths.length; i++) {
 			const path = paths[i];
 			progress(`元に戻しています (${i + 1}/${paths.length})`, i, paths.length);
 
-			const sha = this.state.baseline[path];
+			const sha = target[path];
 			if (sha === undefined) {
 				await vfs.removeIfExists(this.adapter, path);
 			} else {
-				await vfs.writeBase64(this.adapter, path, await this.client.getBlobBase64(sha));
+				// コミット済みならスナップショットから復元できる（通信不要）
+				const local = await this.queuedContent(path);
+				const base64 = local ?? (await this.client.getBlobBase64(sha));
+				await vfs.writeBase64(this.adapter, path, base64);
 			}
 			delete this.state.cache[path];
 			if (this.localTree) {
@@ -330,6 +405,17 @@ export class SyncEngine {
 		}
 		this.state.unstaged = this.state.unstaged.filter((p) => !paths.includes(p));
 		await this.save();
+	}
+
+	/** 未 push のコミットが持っている内容。新しいコミットを優先する。 */
+	private async queuedContent(path: string): Promise<string | null> {
+		for (let i = this.state.queue.length - 1; i >= 0; i--) {
+			const commit = this.state.queue[i];
+			if (!commit.paths.includes(path)) continue;
+			const snapshot = await this.store.loadSnapshot(commit.id);
+			if (snapshot[path] !== undefined) return snapshot[path];
+		}
+		return null;
 	}
 
 	// ---- ブランチ ----------------------------------------------------------
