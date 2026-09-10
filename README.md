@@ -31,6 +31,45 @@ device flow は client secret を必要としない（公開情報の `client_id
 
 初回だけ 8 桁のコードを `github.com/login/device` に入力する。以降は自動。
 
+このプラグインは特定の GitHub App を持たない。**利用者が自分の App を作って、その Client ID を設定に入れる。**
+
+## セットアップ
+
+### 1. GitHub App を作る（1回だけ）
+
+GitHub → Settings → Developer settings → GitHub Apps → **New GitHub App**
+
+| 項目 | 設定 |
+|---|---|
+| GitHub App name | 任意（全体で一意） |
+| Homepage URL | 任意（このリポジトリの URL でよい） |
+| Callback URL | 空のまま |
+| Expire user authorization tokens | チェックしたまま（8時間失効 + 自動更新） |
+| Request user authorization (OAuth) during installation | 外す |
+| **Enable Device Flow** | **必ずチェック** |
+| Webhook → Active | 外す |
+| Repository permissions | **Contents: Read and write** だけ。他は No access |
+| Where can this GitHub App be installed? | Only on this account |
+
+作成後、**Client ID** を控える。client secret は作らなくてよい。
+
+左メニュー **Install App** → 自分のアカウント → **Only select repositories** → 同期したい vault のリポジトリだけを選んで Install。
+
+### 2. プラグインを入れる
+
+[BRAT](https://github.com/TfTHacker/obsidian42-brat) の Add Beta Plugin に `KentaMaeda0916/obsidian-github-sync` を入力して有効化する。
+
+### 3. 設定する
+
+プラグインの設定で
+
+1. **GitHub App の Client ID** に 1 で控えた値
+2. **リポジトリ** に `owner/repo`
+3. **GitHub と接続** → 表示された 8 桁のコードを `github.com/login/device` に入力して承認
+4. **クローン**（空の vault に展開する。初回だけ）
+
+トークンは `.obsidian/plugins/obsidian-github-sync/data.json` に保存される。`.obsidian` は同期対象から外れているので、リポジトリには入らない。
+
 ## しないこと
 
 - 3-way マージ。未コミットの変更がリモートの変更と重なった場合は、何もせず中断する
