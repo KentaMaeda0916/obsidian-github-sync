@@ -122,8 +122,10 @@ export class SyncView extends ItemView {
 		root.empty();
 		root.addClass("github-sync-view");
 
-		if (!this.plugin.engine) {
-			root.createEl("p", { text: "設定で GitHub と接続してください。" });
+		if (!this.plugin.engine || !this.plugin.isConfigured) {
+			root.createEl("p", {
+				text: "設定で GitHub App の Client ID とリポジトリを入力し、GitHub と接続してください。",
+			});
 			return;
 		}
 

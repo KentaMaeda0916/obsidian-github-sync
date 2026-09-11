@@ -66,9 +66,22 @@ export default class GitHubSyncPlugin extends Plugin {
 		await this.buildEngine();
 	}
 
+	/** Client ID・リポジトリ・接続の3つが揃っているか。 */
+	get isConfigured(): boolean {
+		return (
+			this.settings.clientId !== "" &&
+			this.settings.owner !== "" &&
+			this.settings.repo !== "" &&
+			this.auth.isAuthenticated
+		);
+	}
+
 	async buildEngine(): Promise<void> {
 		const dir = this.manifest.dir;
-		if (!dir) return;
+		if (!dir || !this.settings.owner || !this.settings.repo) {
+			this.engine = null;
+			return;
+		}
 
 		const store = new Store(this.app.vault.adapter, dir);
 		const state = await store.loadState("main");
@@ -101,8 +114,8 @@ export default class GitHubSyncPlugin extends Plugin {
 		fn: (engine: SyncEngine) => Promise<unknown>,
 		opts: { silent?: boolean } = {},
 	): Promise<void> {
-		if (!this.engine) {
-			new Notice("設定で GitHub と接続してください");
+		if (!this.engine || !this.isConfigured) {
+			new Notice("設定で GitHub App の Client ID とリポジトリを入力し、GitHub と接続してください");
 			return;
 		}
 		try {
@@ -125,12 +138,19 @@ class SyncSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
+		containerEl.createEl("p", {
+			cls: "setting-item-description",
+			text:
+				"自分の GitHub App を1つ作り（Device Flow を有効化、権限は Contents: Read and write のみ、" +
+				"同期したいリポジトリにだけインストール）、その Client ID をここに入れる。手順は README。",
+		});
+
 		new Setting(containerEl)
 			.setName("GitHub App の Client ID")
-			.setDesc("Device Flow を有効にした GitHub App の Client ID。公開情報なので秘密ではない。")
+			.setDesc("自分で作った GitHub App の Client ID。client secret は不要。")
 			.addText((text) =>
 				text
-					.setPlaceholder("Iv23li…")
+					.setPlaceholder("Iv1.xxxxxxxxxxxxxxxx")
 					.setValue(this.plugin.settings.clientId)
 					.onChange(async (v) => {
 						this.plugin.settings.clientId = v.trim();
@@ -138,18 +158,25 @@ class SyncSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl).setName("リポジトリ").addText((text) =>
-			text
-				.setPlaceholder("owner/repo")
-				.setValue(`${this.plugin.settings.owner}/${this.plugin.settings.repo}`)
-				.onChange(async (v) => {
-					const [owner, repo] = v.split("/");
-					if (!owner || !repo) return;
-					this.plugin.settings.owner = owner.trim();
-					this.plugin.settings.repo = repo.trim();
-					await this.plugin.saveSettings();
-				}),
-		);
+		new Setting(containerEl)
+			.setName("リポジトリ")
+			.setDesc("同期先。GitHub App をインストールしたリポジトリを owner/repo の形で。")
+			.addText((text) =>
+				text
+					.setPlaceholder("owner/repo")
+					.setValue(
+						this.plugin.settings.owner && this.plugin.settings.repo
+							? `${this.plugin.settings.owner}/${this.plugin.settings.repo}`
+							: "",
+					)
+					.onChange(async (v) => {
+						const [owner, repo] = v.split("/").map((x) => x.trim());
+						if (!owner || !repo) return;
+						this.plugin.settings.owner = owner;
+						this.plugin.settings.repo = repo;
+						await this.plugin.saveSettings();
+					}),
+			);
 
 		new Setting(containerEl)
 			.setName("起動時に Pull")
