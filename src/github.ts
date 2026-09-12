@@ -28,6 +28,12 @@ export class GitHubApiError extends Error {
 	}
 }
 
+/**
+ * リポジトリ自体に到達できない。名前の間違い、GitHub App が install されていない、
+ * 権限不足のいずれか。GitHub はどれも 404 で返すので、これ以上の特定はできない。
+ */
+export class RepoUnreachableError extends Error {}
+
 /** 401 を受けたときにトークンを取り直すための供給元。 */
 export interface TokenSource {
 	getAccessToken(): Promise<string>;
@@ -93,15 +99,43 @@ export class GitHubClient {
 
 	// ---- refs --------------------------------------------------------------
 
-	/** ブランチの先頭コミット SHA。ブランチが無ければ null。 */
+	/**
+	 * ブランチの先頭コミット SHA。ブランチが無ければ null。
+	 *
+	 * リポジトリに到達できない場合は RepoUnreachableError。ref の 404 だけでは
+	 * この2つを区別できないため（GitHub はプライベートリポジトリの存在を隠すため
+	 * 403 ではなく 404 を返す）、404 のときはリポジトリ自体を引いて確かめる。
+	 * これをしないと「App を install していない」が「ブランチが無い」に化ける。
+	 */
 	async getBranchHead(branch: string): Promise<string | null> {
 		try {
 			const ref = await this.get<{ object: { sha: string } }>(
-				`${this.base}/git/ref/heads/${encodeURIComponent(branch)}`,
+				`${this.base}/git/ref/heads/${refPath(branch)}`,
 			);
 			return ref.object.sha;
 		} catch (e) {
-			if (e instanceof GitHubApiError && e.status === 404) return null;
+			if (e instanceof GitHubApiError && e.status === 404) {
+				await this.assertRepoReachable();
+				return null;
+			}
+			throw e;
+		}
+	}
+
+	/** リポジトリが読めることを確かめる。読めなければ RepoUnreachableError。 */
+	async assertRepoReachable(): Promise<void> {
+		try {
+			await this.get<unknown>(this.base);
+		} catch (e) {
+			if (e instanceof GitHubApiError && (e.status === 404 || e.status === 403)) {
+				throw new RepoUnreachableError(
+					`リポジトリ ${this.repo.owner}/${this.repo.repo} にアクセスできません。` +
+						"次を確認してください:\n" +
+						"・設定の owner / repo が正しいか（Organization のリポジトリなら owner は Organization 名）\n" +
+						"・GitHub App をこのリポジトリに install しているか\n" +
+						"・App の Repository permissions で Contents が Read and write か（後から変えた場合は再接続が必要）",
+				);
+			}
 			throw e;
 		}
 	}
@@ -125,7 +159,7 @@ export class GitHubClient {
 	}
 
 	async deleteBranch(branch: string): Promise<void> {
-		await this.request("DELETE", `${this.base}/git/refs/heads/${encodeURIComponent(branch)}`);
+		await this.request("DELETE", `${this.base}/git/refs/heads/${refPath(branch)}`);
 	}
 
 	/**
@@ -133,7 +167,7 @@ export class GitHubClient {
 	 * 進んでいる場合は 422 で弾かれる（＝ fast-forward でないと通らない）。
 	 */
 	async updateBranch(branch: string, sha: string, force = false): Promise<void> {
-		await this.request("PATCH", `${this.base}/git/refs/heads/${encodeURIComponent(branch)}`, {
+		await this.request("PATCH", `${this.base}/git/refs/heads/${refPath(branch)}`, {
 			sha,
 			force,
 		});
@@ -215,6 +249,16 @@ export class GitHubClient {
 		});
 		return (res.json as { sha: string }).sha;
 	}
+}
+
+/**
+ * ブランチ名を ref パスに変換する。
+ *
+ * スラッシュはそのまま残す。feature/foo は refs/heads/feature/foo という
+ * 階層のある ref なので、%2F にすると GitHub 側で解決できず 404 になる。
+ */
+function refPath(branch: string): string {
+	return branch.split("/").map(encodeURIComponent).join("/");
 }
 
 function describe(res: RequestUrlResponse, method: string, path: string): string {
