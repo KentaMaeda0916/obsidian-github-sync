@@ -304,6 +304,32 @@ export class SyncEngine {
 		return pushed.length;
 	}
 
+	// ---- branches ----------------------------------------------------------
+
+	/**
+	 * ブランチの先頭 SHA。無ければ、実際にあるブランチ名を添えて投げる。
+	 *
+	 * ここに来る時点でリポジトリには到達できている（到達できなければ
+	 * getBranchHead が RepoUnreachableError を投げる）ので、原因はブランチ名の
+	 * 取り違えか、リモートでの削除・改名に絞られる。一覧を見せれば大抵片付く。
+	 */
+	private async requireBranchHead(branch: string): Promise<string> {
+		const head = await this.client.getBranchHead(branch);
+		if (head) return head;
+
+		let available = "";
+		try {
+			const names = (await this.client.listBranches()).map((b) => b.name);
+			available =
+				names.length === 0
+					? "リポジトリにブランチが1つもありません。"
+					: `あるのは: ${names.slice(0, 20).join(", ")}${names.length > 20 ? " …" : ""}`;
+		} catch {
+			// 一覧が引けなくても、ブランチが無いこと自体は伝える価値がある
+		}
+		throw new Error(`ブランチ ${branch} がリモートにありません。${available}`.trim());
+	}
+
 	// ---- pull --------------------------------------------------------------
 
 	/**
@@ -315,8 +341,7 @@ export class SyncEngine {
 	async pull(progress: Progress = noop): Promise<Change[]> {
 		if (!this.state.headSha) throw new NotClonedError("まだ clone されていません");
 
-		const remoteHead = await this.client.getBranchHead(this.state.branch);
-		if (!remoteHead) throw new Error(`ブランチ ${this.state.branch} がリモートにありません`);
+		const remoteHead = await this.requireBranchHead(this.state.branch);
 		if (remoteHead === this.state.headSha) return [];
 
 		progress("リモートのツリーを取得中");
@@ -358,8 +383,7 @@ export class SyncEngine {
 	 * メモリ使用量はファイル数に比例しない。既存ファイルは削除せず上書きのみ。
 	 */
 	async clone(branch: string, progress: Progress = noop): Promise<number> {
-		const head = await this.client.getBranchHead(branch);
-		if (!head) throw new Error(`ブランチ ${branch} がリモートにありません`);
+		const head = await this.requireBranchHead(branch);
 
 		progress("ファイル一覧を取得中");
 		const remoteTree = await this.client.getFlatTree(head);
@@ -443,8 +467,7 @@ export class SyncEngine {
 			);
 		}
 
-		const head = await this.client.getBranchHead(name);
-		if (!head) throw new Error(`ブランチ ${name} がリモートにありません`);
+		const head = await this.requireBranchHead(name);
 
 		progress("差分を計算中");
 		const targetTree = await this.client.getFlatTree(head);

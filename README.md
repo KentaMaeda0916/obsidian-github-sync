@@ -70,6 +70,16 @@ GitHub → Settings → Developer settings → GitHub Apps → **New GitHub App*
 
 トークンは `.obsidian/plugins/obsidian-github-sync/data.json` に保存される。`.obsidian` は同期対象から外れているので、リポジトリには入らない。
 
+### うまくいかないとき
+
+**「リポジトリ … にアクセスできません」** — GitHub は認証が通っていてもリポジトリが見えない場合、その存在を隠すため 404 を返す。原因は次のどれか。
+
+- 設定の `owner/repo` が違う（Organization のリポジトリなら owner は Organization 名）
+- 1 で作った GitHub App を、そのリポジトリに **install** していない。App を作るだけでは足りない
+- App の Repository permissions で Contents が Read and write になっていない。後から変えた場合は再接続が必要
+
+**「ブランチ … がリモートにありません」** — こちらはリポジトリには到達できている。メッセージに実際にあるブランチ名が出るので、既定ブランチが `master` だった等を確認する。
+
 ## しないこと
 
 - 3-way マージ。未コミットの変更がリモートの変更と重なった場合は、何もせず中断する
